@@ -1,6 +1,6 @@
 <?php
 
-$owner = 'yoni-tad';
+$owner = '';
 $token = '';
 
 // Function to get all repositories for the owner with pagination
