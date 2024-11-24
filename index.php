@@ -1,95 +1,173 @@
 <?php
 
-$owner = '';
-$token = '';
+include 'assets/db.php';
+include 'assets/bot.php';
 
-// Function to get all repositories for the owner with pagination
-function getAllRepositories($token) {
-    $repos = [];
-    $page = 1;
-    do {
-        $url = "https://api.github.com/user/repos?per_page=100&page=$page";
-        $headers = [
-            "Authorization: token $token",
-            "User-Agent: request"
+function validateFormat($text)
+{
+    if (preg_match('/^username:([a-zA-Z0-9\-]+)\ntoken:([a-zA-Z0-9_\-]+)$/', $text, $matches)) {
+        return [
+            'username' => $matches[1],
+            'token' => $matches[2]
         ];
+    }
+    return false;
+}
 
-        $options = [
+function getTodayCommitCount($username, $token)
+{
+    $today = date('Y-m-d');
+    $url = "https://api.github.com/user/repos";
+    $headers = [
+        "Authorization: token $token",
+        "User-Agent: PHP"
+    ];
+
+    $opts = [
+        'http' => [
+            'method' => 'GET',
+            'header' => implode("\r\n", $headers)
+        ]
+    ];
+    $context = stream_context_create($opts);
+    $repos = json_decode(file_get_contents($url, false, $context), true);
+
+    if (!$repos) return false;
+
+    $totalCommits = 0;
+
+    foreach ($repos as $repo) {
+        $repoOwner = $repo['owner']['login'];
+        $repoName = $repo['name'];
+        $commitsUrl = "https://api.github.com/repos/$repoOwner/$repoName/commits?since={$today}T00:00:00Z&until={$today}T23:59:59Z";
+
+        $repoContext = stream_context_create([
             'http' => [
-                'header' => implode("\r\n", $headers),
                 'method' => 'GET',
-                'timeout' => 10 // Set a timeout for the request
+                'header' => implode("\r\n", $headers)
             ]
-        ];
+        ]);
 
-        $context = stream_context_create($options);
-        $response = @file_get_contents($url, false, $context);
+        $commits = json_decode(file_get_contents($commitsUrl, false, $repoContext), true);
 
-        if ($response === FALSE) {
-            die('Error: Unable to fetch repositories. Check your token and permissions.');
+        if ($commits) {
+            $totalCommits += count($commits);
         }
+    }
 
-        $pageRepos = json_decode($response, true);
-        $repos = array_merge($repos, $pageRepos);
-        $page++;
-    } while (count($pageRepos) === 100); // GitHub API returns up to 100 items per page
-
-    return $repos;
+    return $totalCommits;
 }
 
-// Function to get commits for a specific day for a specific repository with pagination
-function getCommitsForDay($repoOwner, $repoName, $date, $token) {
-    $commits = [];
-    $page = 1;
-    do {
-        $url = "https://api.github.com/repos/$repoOwner/$repoName/commits?since=" . $date . "T00:00:00Z&until=" . $date . "T23:59:59Z&per_page=100&page=$page";
-        $headers = [
-            "Authorization: token $token",
-            "User-Agent: request"
-        ];
+// -------------------- BOT -----------------------
 
-        $options = [
-            'http' => [
-                'header' => implode("\r\n", $headers),
-                'method' => 'GET',
-                'timeout' => 10 // Set a timeout for the request
-            ]
-        ];
+if ($text == '/start') {
+    bot('sendMessage', [
+        'chat_id' => $chat_id,
+        'text' => "Welcome to GitHub Commit Tracker Bot! \n\n👋 Hi there! I'm here to help you keep track of your daily commits on GitHub.\n\n📅 Every day, I'll notify you with the total number of commits you've made across all your repositories, both public and private.\n\n🔒 Rest assured, your data is secure with me.\n\nTo get started, please share your GitHub username and personal access token in the following format:\n\n```\nusername:your-github-username\ntoken:your-github-token\n```\nFor example:\n```\nusername:yoni-tad\ntoken:ghp_16pWRWSPZTW25huvSc9FWSqNvBe9ZMMLtisx\n```",
+        'parse_mode' => 'Markdown',
+        'reply_markup' => json_encode([
+            'resize_keyboard' => true,
+            'keyboard' => [
+                [['text' => "Check Today Status🚀"]],
+            ],
+        ]),
+    ]);
+} elseif ($text == "/about") {
+    bot('sendMessage', [
+        'chat_id' => $chat_id,
+        'text' => "✅ *GitHub Commit Tracker Bot*\n\nThis bot helps you keep track of your daily commits on GitHub.\n\nDeveloped by: Yoni Tad\n\nFor any queries or support, contact me at @yonitad0.",
+        'parse_mode' => 'Markdown'
+    ]);
+} elseif ($text == "Check Today Status🚀") {
+    $query = mysqli_query($con, "SELECT * FROM `commit` WHERE `telegram_id` = '$chat_id' AND `status` = 'Active'");
+    if (mysqli_num_rows($query) > 0) {
+        $row = mysqli_fetch_assoc($query);
+        $username = $row["user_name"];
+        $token = $row["token"];
 
-        $context = stream_context_create($options);
-        $response = @file_get_contents($url, false, $context);
+        $response = bot('sendMessage', [
+            'chat_id' => $chat_id,
+            'text' => "Please wait ... 🛠",
+        ]);
 
-        if ($response === FALSE) {
-            die('Error: Unable to fetch commits. Check your token and permissions.');
+        $commitCount = getTodayCommitCount($username, $token);
+        if ($commitCount !== false) {
+            $message_id = $response->result->message_id;
+            bot('deleteMessage', [
+                'chat_id' => $chat_id,
+                'message_id' => $message_id,
+            ]);
+
+            bot('sendMessage', [
+                'chat_id' => $chat_id,
+                'text' => "✅ Today's commit count for $username: $commitCount commits 📈",
+            ]);
+        } else {
+            bot('sendMessage', [
+                'chat_id' => $chat_id,
+                'text' => "❌ There was an error fetching your commit data. Please ensure your GitHub token is correct and has the required permissions."
+            ]);
         }
+    } else {
+        bot('sendMessage', [
+            'chat_id' => $chat_id,
+            'text' => "❌ Null credential! Please send your GitHub username and personal access token in the following format:\n\n```\nusername:your-github-username\ntoken:your-github-token\n```\nFor example:\n```\nusername:yoni-tad\ntoken:ghp_16pWRWSPZTW25huvSc9FWSqNvBe9ZMMLtisx\n```",
+            'parse_mode' => 'Markdown'
+        ]);
+    }
+} else {
+    $credentials = validateFormat($text);
+    if ($credentials) {
+        $username = $credentials['username'];
+        $token = $credentials['token'];
 
-        $pageCommits = json_decode($response, true);
-        $commits = array_merge($commits, $pageCommits);
-        $page++;
-    } while (count($pageCommits) === 100); // GitHub API returns up to 100 items per page
+        $response = bot('sendMessage', [
+            'chat_id' => $chat_id,
+            'text' => "Please wait ...🛠"
+        ]);
 
-    return count($commits);
+        $commitCount = getTodayCommitCount($username, $token);
+        if ($commitCount !== false) {
+            $query = mysqli_query($con, "SELECT * FROM `commit` WHERE `telegram_id` = '$chat_id' AND `status` = 'Active'");
+            if (mysqli_num_rows($query) > 0) {
+                $sql = mysqli_query($con, "UPDATE `commit` SET `user_name` = '$username', `token` = '$token', `status` = 'Active' WHERE `telegram_id` = '$chat_id'");
+            } else {
+                $sql = mysqli_query($con, "INSERT INTO `commit`(`telegram_id`, `user_name`, `token`, `status`) VALUES ('$chat_id','$username','$token','Active')");
+            }
+            if ($sql) {
+                $message_id = $response->result->message_id;
+                bot('deleteMessage', [
+                    'chat_id' => $chat_id,
+                    'message_id' => $message_id,
+                ]);
+
+                bot('sendMessage', [
+                    'chat_id' => $chat_id,
+                    'text' => "✅ Your credentials have been saved successfully!\n\nToday's commit count for $username: $commitCount commits 📈",
+                    'reply_markup' => json_encode([
+                        'resize_keyboard' => true,
+                        'keyboard' => [
+                            [['text' => "Check Today Status🚀"]],
+                        ],
+                    ]),
+                ]);
+            } else {
+                bot('sendMessage', [
+                    'chat_id' => $chat_id,
+                    'text' => "❌ There was an error. Please try again."
+                ]);
+            }
+        } else {
+            bot('sendMessage', [
+                'chat_id' => $chat_id,
+                'text' => "❌ There was an error fetching your commit data. Please ensure your GitHub token is correct and has the required permissions."
+            ]);
+        }
+    } else {
+        bot('sendMessage', [
+            'chat_id' => $chat_id,
+            'text' => "❌ Invalid format! Please send your GitHub username and personal access token in the following format:\n\n```\nusername:your-github-username\ntoken:your-github-token\n```\nFor example:\n```\nusername:yoni-tad\ntoken:ghp_16pWRWSPZTW25huvSc9FWSqNvBe9ZMMLtisx\n```",
+            'parse_mode' => 'Markdown'
+        ]);
+    }
 }
-
-// Get the date for which to fetch commits (e.g., today)
-$date = new DateTime('now', new DateTimeZone('UTC'));
-$dateString = $date->format('Y-m-d');
-
-// Fetch all repositories
-$repos = getAllRepositories($token);
-
-if (!is_array($repos)) {
-    die('Error: Unable to fetch repositories. Please check your token and permissions.');
-}
-
-// Fetch commits for the specific day
-$totalCommitCount = 0;
-foreach ($repos as $repo) {
-    $repoName = $repo['name'];
-    $repoOwner = $repo['owner']['login'];
-    $totalCommitCount += getCommitsForDay($repoOwner, $repoName, $dateString, $token);
-}
-
-echo "Date: $dateString, Total Commits: $totalCommitCount\n";
-
-?>
